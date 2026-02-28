@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
 """Генератор тестовых данных о продажах в CSV формате."""
 
 import csv
+import random
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -13,6 +15,9 @@ CATEGORIES = [
     "MA063", "MA064", "MA065", "MA066", "MA067", "MA068", "MA069", "MA070", "MA071",
     "MA072", "MA073", "MA076", "MA077", "MA078"
 ]
+
+CUSTOMER_TYPES = ["B2B", "B2C"]
+RG_CODE_CURRENT = ["B2C_CL", "MP_OZ", "MP_RT", "MP_WB", "MP_YM", "ДКП"]
 
 OUTPUT_FILE = "sales_data.csv"
 
@@ -37,10 +42,23 @@ def generate_sales_data():
         for category in CATEGORIES:
             # Генерируем случайные продажи от 100 до 50000
             sales = 100 + (hash(f"{current_date}{category}") % 49900)
+            
+            # Случайный выбор customer_type
+            customer_type = random.choice(CUSTOMER_TYPES)
+            
+            # Случайный выбор rg_code_current
+            rg_code_current = random.choice(RG_CODE_CURRENT)
+            
+            # Генерация create_sale (больше sales, от sales + 1 до sales + 50000)
+            create_sale = sales + 1 + (hash(f"{current_date}{category}_create") % 49900)
+            
             rows.append({
                 "date": current_date.isoformat(),
                 "category": category,
-                "sales": sales
+                "sales": sales,
+                "customer_type": customer_type,
+                "rg_code_current": rg_code_current,
+                "create_sale": create_sale
             })
         current_date += timedelta(days=1)
     
@@ -48,7 +66,7 @@ def generate_sales_data():
     
     # Запись в CSV
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales"], delimiter=";")
+        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales", "customer_type", "rg_code_current", "create_sale"], delimiter=";")
         writer.writeheader()
         writer.writerows(rows)
     
