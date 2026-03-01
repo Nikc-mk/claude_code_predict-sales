@@ -74,8 +74,8 @@ def predict_current_month(
         as_of_date = datetime.strptime(as_of_date, "%Y-%m-%d").date()
 
     yesterday = as_of_date - timedelta(days=1)
-    year, month = yesterday.year, yesterday.month
-    t = yesterday.day  # последний известный день
+    year, month = as_of_date.year, as_of_date.month  # прогнозируем текущий календарный месяц
+    t = as_of_date.day - 1  # данных за текущий месяц: 0 дней если 1-е число
 
     _, n_days = monthrange(year, month)
     days_left = n_days - t
@@ -106,13 +106,12 @@ def predict_current_month(
     cat2idx = {c: i for i, c in enumerate(categories)}
 
     # --- 3. Календарные признаки для дня t ---
+    # При t=0 (1-е число) используем день 1 для признаков: тогда lastyear_cumul
+    # вернёт продажи 1-го дня прошлого года (≠0, разные у категорий), а не 0.
+    t_eff = max(t, 1)
     cal = build_calendar_df(year, month)
-    day_date = pd.Timestamp(year=year, month=month, day=t)
-    if day_date in cal.index:
-        cal_row = cal.loc[day_date]
-    else:
-        # Край месяца: t = n_days (последний день — прогнозировать нечего, но обработаем)
-        cal_row = cal.iloc[-1]
+    day_date = pd.Timestamp(year=year, month=month, day=t_eff)
+    cal_row = cal.loc[day_date] if day_date in cal.index else cal.iloc[-1]
 
     # --- 4. Формируем признаки для всех категорий ---
     records = []
@@ -122,7 +121,7 @@ def predict_current_month(
             year=year,
             month=month,
             cat=cat,
-            t=t,
+            t=t_eff,
             day_date=day_date,
             cal_row=cal_row,
         )

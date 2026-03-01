@@ -108,7 +108,7 @@ TRAIN_CONFIG = {
     "batch_size": 512,
     "lr": 1e-3,
     "weight_decay": 1e-4,
-    "epochs": 100,
+    "epochs": 50,
     "val_months_count": 3,       # фиксированное число последних завершённых месяцев для валидации
     "patience": 10,              # для ReduceLROnPlateau
     "huber_delta": 1.0,
