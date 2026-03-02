@@ -51,10 +51,15 @@ class TabularDataset(Dataset):
         self,
         wide_df: pd.DataFrame,
         categories: list[str],
+        wide_create_df: Optional[pd.DataFrame] = None,
         scaler: Optional[StandardScaler] = None,
         fit_on_init: bool = True,
     ):
         self.wide_df = wide_df
+        self.wide_create_df = (
+            wide_create_df if wide_create_df is not None
+            else pd.DataFrame(0.0, index=wide_df.index, columns=wide_df.columns)
+        )
         self.categories = categories
         self.cat2idx = {c: i for i, c in enumerate(categories)}
         self.n_cats = len(categories)
@@ -133,9 +138,11 @@ class TabularDataset(Dataset):
         month_sales: pd.Series,
     ) -> list[float]:
         """
-        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (17 штук):
+        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (22 штуки):
           days_left, work_days_left, days_passed, work_days_passed, is_weekend,
           cumulative_sales, sales_last_7_days, sales_last_14_days, sales_last_28_days,
+          create_sales_last_3_days, create_sales_last_7_days,
+          create_sales_last_10_days, create_sales_last_14_days,
           sales_lastyear_1_to_t, sales_lastyear_month_total,
           sales_previous_month_total,
           year, month_idx, time_idx,
@@ -148,6 +155,12 @@ class TabularDataset(Dataset):
         sales_7 = get_rolling_sum(self.wide_df, day_date, cat, 7)
         sales_14 = get_rolling_sum(self.wide_df, day_date, cat, 14)
         sales_28 = get_rolling_sum(self.wide_df, day_date, cat, 28)
+
+        # Созданные заказы: скользящие окна
+        cs_3 = get_rolling_sum(self.wide_create_df, day_date, cat, 3)
+        cs_7 = get_rolling_sum(self.wide_create_df, day_date, cat, 7)
+        cs_10 = get_rolling_sum(self.wide_create_df, day_date, cat, 10)
+        cs_14 = get_rolling_sum(self.wide_create_df, day_date, cat, 14)
 
         # Прошлый год: накопленная сумма за 1..t и итог всего месяца
         lastyear_cumul = get_cumulative_to_day(self.wide_df, year - 1, month, cat, t)
@@ -166,6 +179,10 @@ class TabularDataset(Dataset):
             sales_7,
             sales_14,
             sales_28,
+            cs_3,
+            cs_7,
+            cs_10,
+            cs_14,
             lastyear_cumul,
             lastyear_month_total,
             prev_month_total,
@@ -242,6 +259,7 @@ class TabularDataset(Dataset):
     def train_val_split(
         wide_df: pd.DataFrame,
         categories: list[str],
+        wide_create_df: Optional[pd.DataFrame] = None,
         val_months_count: int = 3,
     ) -> tuple["TabularDataset", "TabularDataset"]:
         """
@@ -268,16 +286,19 @@ class TabularDataset(Dataset):
         train_months = set(ym_pairs[:n_train])
         val_months = set(ym_pairs[n_train:])
 
-        def _filter_wide(months_set):
-            mask = [(d.year, d.month) in months_set for d in wide_df.index]
-            return wide_df.loc[mask]
+        def _filter_wide(wdf, months_set):
+            mask = [(d.year, d.month) in months_set for d in wdf.index]
+            return wdf.loc[mask]
 
-        train_wide = _filter_wide(train_months)
-        val_wide = _filter_wide(val_months)
+        train_wide = _filter_wide(wide_df, train_months)
+        val_wide = _filter_wide(wide_df, val_months)
+
+        train_create = _filter_wide(wide_create_df, train_months) if wide_create_df is not None else None
+        val_create = _filter_wide(wide_create_df, val_months) if wide_create_df is not None else None
 
         # Обучаем скейлер только на train
-        train_ds = TabularDataset(train_wide, categories, scaler=None, fit_on_init=True)
-        val_ds = TabularDataset(val_wide, categories, scaler=train_ds.scaler, fit_on_init=False)
+        train_ds = TabularDataset(train_wide, categories, wide_create_df=train_create, scaler=None, fit_on_init=True)
+        val_ds = TabularDataset(val_wide, categories, wide_create_df=val_create, scaler=train_ds.scaler, fit_on_init=False)
 
         print(
             f"Dataset split: {len(train_months)} train months ({len(train_ds)} samples), "

@@ -17,6 +17,8 @@ import argparse
 import csv
 import os
 import time
+from calendar import monthrange
+from datetime import date
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -197,6 +199,7 @@ def plot_val_mape_by_day(
     scaler,
     artifacts_dir: str,
     device: torch.device,
+    wide_create_df: pd.DataFrame | None = None,
 ) -> str:
     """
     Строит график MAPE по дням месяца для каждого валидационного месяца.
@@ -248,6 +251,7 @@ def plot_val_mape_by_day(
                 cumulative = float(month_sales.iloc[:t].sum())
                 cumulative_total += cumulative
 
+                wcd = wide_create_df if wide_create_df is not None else wide_df
                 feats = [
                     float(cal_row["days_left"]),
                     float(cal_row["work_days_left"]),
@@ -258,6 +262,10 @@ def plot_val_mape_by_day(
                     get_rolling_sum(wide_df, day_date, cat, 7),
                     get_rolling_sum(wide_df, day_date, cat, 14),
                     get_rolling_sum(wide_df, day_date, cat, 28),
+                    get_rolling_sum(wcd, day_date, cat, 3),
+                    get_rolling_sum(wcd, day_date, cat, 7),
+                    get_rolling_sum(wcd, day_date, cat, 10),
+                    get_rolling_sum(wcd, day_date, cat, 14),
                     get_cumulative_to_day(wide_df, year - 1, month, cat, t),
                     get_month_total(wide_df, year - 1, month, cat),
                     get_previous_month_total(wide_df, year, month, cat),
@@ -345,13 +353,14 @@ def train(
     print(f"  Categories ({len(categories)}): {categories[:5]}{'...' if len(categories) > 5 else ''}")
 
     wide_df = pivot_to_wide(df, categories=categories)
+    wide_create_df = pivot_to_wide(df, categories=categories, value_col="create_sale")
     print(f"  Wide shape: {wide_df.shape}")
 
     # --- 2. Датасет ---
     print("Building datasets...")
     t0 = time.time()
     train_ds, val_ds = TabularDataset.train_val_split(
-        wide_df, categories, val_months_count=val_months_count
+        wide_df, categories, wide_create_df=wide_create_df, val_months_count=val_months_count
     )
     print(f"  Built in {time.time() - t0:.1f}s")
 
@@ -455,6 +464,10 @@ def train(
         {(d.year, d.month) for d in wide_df.index},
         key=lambda x: (x[0], x[1]),
     )
+    today = date.today()
+    _, last_day = monthrange(today.year, today.month)
+    if ym_all and ym_all[-1] == (today.year, today.month) and today.day < last_day:
+        ym_all = ym_all[:-1]
     n_val = min(val_months_count, len(ym_all) - 1)
     val_months = ym_all[-n_val:]
 
@@ -470,6 +483,7 @@ def train(
         scaler=train_ds.scaler,
         artifacts_dir=artifacts_dir,
         device=device,
+        wide_create_df=wide_create_df,
     )
     print(f"Val MAPE plot saved → {mape_plot_path}")
 

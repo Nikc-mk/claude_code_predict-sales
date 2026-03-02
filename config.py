@@ -46,6 +46,11 @@ NUMERICAL_FEATURES = [
     "sales_last_7_days",       # сумма продаж за последние 7 дней (краткосрочный тренд)
     "sales_last_14_days",      # сумма продаж за последние 14 дней (среднесрочный тренд)
     "sales_last_28_days",      # сумма продаж за последние 28 дней (месячный тренд)
+    # --- Созданные заказы ---
+    "create_sales_last_3_days",    # сумма created orders за последние 3 дня
+    "create_sales_last_7_days",    # сумма created orders за последние 7 дней
+    "create_sales_last_10_days",   # сумма created orders за последние 10 дней
+    "create_sales_last_14_days",   # сумма created orders за последние 14 дней
     # --- Сезонность (прошлый год) ---
     "sales_lastyear_1_to_t",   # накопленная сумма за 1..t число того же месяца год назад
     "sales_lastyear_month_total",  # итог продаж за весь тот же месяц год назад
@@ -59,7 +64,7 @@ NUMERICAL_FEATURES = [
     "month_sin",               # sin(2π * месяц / 12) — циклическое кодирование месяца
     "month_cos",               # cos(2π * месяц / 12) — циклическое кодирование месяца
 ]
-NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)  # 17
+NUM_NUMERICAL_FEATURES = len(NUMERICAL_FEATURES)  # 21
 
 # ---------------------------------------------------------------------------
 # Гиперпараметры модели
@@ -108,7 +113,7 @@ TRAIN_CONFIG = {
     "batch_size": 512,
     "lr": 1e-3,
     "weight_decay": 1e-4,
-    "epochs": 50,
+    "epochs": 10,
     "val_months_count": 3,       # фиксированное число последних завершённых месяцев для валидации
     "patience": 10,              # для ReduceLROnPlateau
     "huber_delta": 1.0,

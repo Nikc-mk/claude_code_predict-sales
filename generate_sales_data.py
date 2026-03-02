@@ -37,10 +37,13 @@ def generate_sales_data():
         for category in CATEGORIES:
             # Генерируем случайные продажи от 100 до 50000
             sales = 100 + (hash(f"{current_date}{category}") % 49900)
+            # Генерация create_sale (больше sales, от sales + 1 до sales + 50000)
+            create_sale = sales + 1 + (hash(f"{current_date}{category}_create") % 49900)
             rows.append({
                 "date": current_date.isoformat(),
                 "category": category,
-                "sales": sales
+                "sales": sales,
+                "create_sale": create_sale
             })
         current_date += timedelta(days=1)
     
@@ -48,7 +51,7 @@ def generate_sales_data():
     
     # Запись в CSV
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales"], delimiter=";")
+        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales", "create_sale"], delimiter=";")
         writer.writeheader()
         writer.writerows(rows)
     

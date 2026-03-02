@@ -94,6 +94,7 @@ def predict_current_month(
         categories = pickle.load(f)
 
     wide_df = pivot_to_wide(df, categories=categories)
+    wide_create_df = pivot_to_wide(df, categories=categories, value_col="create_sale")
 
     # --- 2. Загрузка модели и скейлера ---
     model, checkpoint = load_model(model_path, device=device)
@@ -124,6 +125,7 @@ def predict_current_month(
             t=t_eff,
             day_date=day_date,
             cal_row=cal_row,
+            wide_create_df=wide_create_df,
         )
         records.append(feat)
 
@@ -182,6 +184,7 @@ def _compute_inference_features(
     t: int,
     day_date: pd.Timestamp,
     cal_row: pd.Series,
+    wide_create_df: pd.DataFrame | None = None,
 ) -> dict:
     """Аналог TabularDataset._compute_features, но для одной категории."""
     from build_features import get_month_sales, get_month_total
@@ -192,6 +195,12 @@ def _compute_inference_features(
     sales_7 = get_rolling_sum(wide_df, day_date, cat, 7)
     sales_14 = get_rolling_sum(wide_df, day_date, cat, 14)
     sales_28 = get_rolling_sum(wide_df, day_date, cat, 28)
+
+    wcd = wide_create_df if wide_create_df is not None else wide_df
+    cs_3 = get_rolling_sum(wcd, day_date, cat, 3)
+    cs_7 = get_rolling_sum(wcd, day_date, cat, 7)
+    cs_10 = get_rolling_sum(wcd, day_date, cat, 10)
+    cs_14 = get_rolling_sum(wcd, day_date, cat, 14)
 
     lastyear_cumul = get_cumulative_to_day(wide_df, year - 1, month, cat, t)
     lastyear_month_total = get_month_total(wide_df, year - 1, month, cat)
@@ -207,6 +216,10 @@ def _compute_inference_features(
         sales_7,
         sales_14,
         sales_28,
+        cs_3,
+        cs_7,
+        cs_10,
+        cs_14,
         lastyear_cumul,
         lastyear_month_total,
         prev_month_total,

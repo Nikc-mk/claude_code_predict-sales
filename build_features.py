@@ -31,17 +31,42 @@ def load_raw_data(path: str) -> pd.DataFrame:
 
     # Переименуем колонки по позиции, если имена отличаются
     df.columns = [c.strip() for c in df.columns]
+
+    # Ищем колонку create_sale ДО rename (пока все колонки видны)
+    create_raw = None
+    if "create_sale" in df.columns:
+        create_raw = "create_sale"
+    else:
+        create_raw = next((c for c in df.columns if "create" in c.lower()), None)
+
     col_map = _detect_columns(df.columns.tolist())
-    df = df.rename(columns=col_map)[["date", "category", "sales"]]
+    df = df.rename(columns=col_map)
+
+    # Сохраняем create_sale из сырого df до среза
+    if create_raw is not None:
+        # после rename имя могло остаться или смениться
+        create_renamed = col_map.get(create_raw, create_raw)
+        create_series = df[create_renamed].copy()
+    else:
+        create_series = None
+
+    df = df[["date", "category", "sales"]]
 
     # Очистка числового поля от пробелов/неразрывных пробелов
-    df["sales"] = (
-        df["sales"]
-        .astype(str)
-        .str.replace(r"[\s\u00a0\u202f]", "", regex=True)
-        .str.replace(",", ".")
-        .astype(float)
-    )
+    def _clean_numeric(s: pd.Series) -> pd.Series:
+        return (
+            s.astype(str)
+            .str.replace(r"[\s\u00a0\u202f]", "", regex=True)
+            .str.replace(",", ".")
+            .astype(float)
+        )
+
+    df["sales"] = _clean_numeric(df["sales"])
+
+    if create_series is not None:
+        df["create_sale"] = _clean_numeric(create_series).values
+    else:
+        df["create_sale"] = 0.0
 
     # Парсинг даты
     df["date"] = _parse_dates(df["date"])
@@ -94,21 +119,26 @@ def _parse_dates(series: pd.Series) -> pd.Series:
 # 2. Pivot: long → wide
 # ---------------------------------------------------------------------------
 
-def pivot_to_wide(df: pd.DataFrame, categories: list[str] | None = None) -> pd.DataFrame:
+def pivot_to_wide(
+    df: pd.DataFrame,
+    categories: list[str] | None = None,
+    value_col: str = "sales",
+) -> pd.DataFrame:
     """
-    Преобразует long-таблицу (date, category, sales) в wide-таблицу:
+    Преобразует long-таблицу в wide-таблицу:
       index  = date (ежедневная частота)
       columns = категории товаров
-      values = Оборот_факт (пропуски → 0)
+      values = value_col (пропуски → 0)
 
     Параметры
     ---------
     categories : список категорий для включения в результат.
                  Если None — берутся все категории из данных.
                  Если передан — недостающие колонки добавляются нулями.
+    value_col : колонка со значениями (по умолчанию "sales").
     """
     # Агрегация: если одна категория встречается несколько раз в день — суммируем
-    agg = df.groupby(["date", "category"])["sales"].sum().unstack(fill_value=0)
+    agg = df.groupby(["date", "category"])[value_col].sum().unstack(fill_value=0)
 
     # Ежедневная частота — заполняем пропущенные дни нулями
     date_range = pd.date_range(agg.index.min(), agg.index.max(), freq="D")
