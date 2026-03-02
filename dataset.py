@@ -10,6 +10,7 @@ dataset.py — формирование обучающих сэмплов для
 
 import pickle
 from calendar import monthrange
+from datetime import date
 from typing import Optional
 
 import numpy as np
@@ -252,6 +253,14 @@ class TabularDataset(Dataset):
             {(d.year, d.month) for d in dates},
             key=lambda x: (x[0], x[1]),
         )
+
+        # Исключаем текущий месяц, если он незавершён
+        today = date.today()
+        current_ym = (today.year, today.month)
+        _, last_day = monthrange(today.year, today.month)
+        if ym_pairs and ym_pairs[-1] == current_ym and today.day < last_day:
+            ym_pairs = ym_pairs[:-1]
+
         n_total = len(ym_pairs)
         n_val = min(val_months_count, n_total - 1)  # не менее 1 месяца на train
         n_train = n_total - n_val
