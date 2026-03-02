@@ -87,6 +87,16 @@ class FTTransformerModel(nn.Module):
             norm=nn.LayerNorm(d_model),
         )
 
+        # --- Дополнительная head для обработки категории ---
+        self.cat_head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.ReLU(),
+            nn.Linear(d_model // 2, d_model),
+        )
+
+        # --- Финальная комбинация ---
+        self.fusion = nn.Linear(d_model * 2, d_model)
+
         # --- Регрессионная голова ---
         self.head = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
@@ -152,8 +162,16 @@ class FTTransformerModel(nn.Module):
         # --- Выход CLS-токена ---
         cls_output = encoded[:, 0, :]  # (B, d_model)
 
+        # --- Категориальный выход (берем последний токен - категорию) ---
+        cat_output = encoded[:, -1, :]  # (B, d_model)
+        cat_output = self.cat_head(cat_output)  # (B, d_model)
+
+        # --- Комбинируем CLS и категорию ---
+        combined = torch.cat([cls_output, cat_output], dim=-1)  # (B, d_model * 2)
+        combined = self.fusion(combined)  # (B, d_model)
+
         # --- Регрессионная голова ---
-        out = self.head(cls_output).squeeze(1)  # (B,)
+        out = self.head(combined).squeeze(1)  # (B,)
         return out
 
     def count_parameters(self) -> int:
