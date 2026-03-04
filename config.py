@@ -114,8 +114,8 @@ TRAIN_CONFIG = {
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "epochs": 10,
-    "val_months_count": 3,        # число месяцев для валидации (берутся перед blind_test)
-    "blind_test_months_count": 1, # число последних завершённых месяцев на слепой тест (0 = отключено)
+    "val_months_count": 0,        # число месяцев для валидации (берутся перед blind_test)
+    "blind_test_months_count": 2, # число последних завершённых месяцев на слепой тест (0 = отключено)
     "patience": 10,              # для ReduceLROnPlateau
     "huber_delta": 1.0,
     "min_months_for_sample": 2,  # минимум месяцев истории для начала обучения

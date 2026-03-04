@@ -246,6 +246,28 @@ def plot_val_mape_by_day(
 
         days, mapes, predicted_totals = [], [], []
 
+        # --- Предвычисления (не меняются с t) ---
+        month_sales_cache    = {cat: get_month_sales(wide_df, year, month, cat)     for cat in categories}
+        lastyear_ms_cache    = {cat: get_month_sales(wide_df, year - 1, month, cat) for cat in categories}
+        lastyear_total_cache = {cat: float(lastyear_ms_cache[cat].sum())             for cat in categories}
+        prev_total_cache     = {cat: get_previous_month_total(wide_df, year, month, cat) for cat in categories}
+
+        # Векторизованные скользящие суммы по всем дням месяца сразу
+        wcd = wide_create_df if wide_create_df is not None else wide_df
+        roll_start   = pd.Timestamp(year=year, month=month, day=1) - pd.Timedelta(days=27)
+        month_end_ts = pd.Timestamp(year=year, month=month, day=n_days)
+        df_win  = wide_df.loc[roll_start:month_end_ts]
+        wcd_win = wcd.loc[roll_start:month_end_ts]
+        roll7    = df_win.rolling(7,  min_periods=1).sum()
+        roll14   = df_win.rolling(14, min_periods=1).sum()
+        roll28   = df_win.rolling(28, min_periods=1).sum()
+        c_roll3  = wcd_win.rolling(3,  min_periods=1).sum()
+        c_roll7  = wcd_win.rolling(7,  min_periods=1).sum()
+        c_roll10 = wcd_win.rolling(10, min_periods=1).sum()
+        c_roll14 = wcd_win.rolling(14, min_periods=1).sum()
+
+        print(f"  {year}-{month:02d} ({split})...", end="", flush=True)
+
         for t in range(1, n_days):  # t=1..T-1 (последний день — только факт)
             day_date = pd.Timestamp(year=year, month=month, day=t)
             if day_date not in cal.index:
@@ -255,11 +277,22 @@ def plot_val_mape_by_day(
             # Признаки для всех категорий сразу
             X_list, cumulative_total = [], 0.0
             for cat in categories:
-                month_sales = get_month_sales(wide_df, year, month, cat)
-                cumulative = float(month_sales.iloc[:t].sum())
+                month_sales = month_sales_cache[cat]
+                cumulative  = float(month_sales.iloc[:t].sum())
                 cumulative_total += cumulative
 
-                wcd = wide_create_df if wide_create_df is not None else wide_df
+                s7   = float(roll7.at[day_date,   cat]) if day_date in roll7.index   else 0.0
+                s14  = float(roll14.at[day_date,  cat]) if day_date in roll14.index  else 0.0
+                s28  = float(roll28.at[day_date,  cat]) if day_date in roll28.index  else 0.0
+                cs3  = float(c_roll3.at[day_date,  cat]) if day_date in c_roll3.index  else 0.0
+                cs7  = float(c_roll7.at[day_date,  cat]) if day_date in c_roll7.index  else 0.0
+                cs10 = float(c_roll10.at[day_date, cat]) if day_date in c_roll10.index else 0.0
+                cs14 = float(c_roll14.at[day_date, cat]) if day_date in c_roll14.index else 0.0
+
+                lastyear_cumul       = float(lastyear_ms_cache[cat].iloc[:t].sum())
+                lastyear_month_total = lastyear_total_cache[cat]
+                prev_month_total     = prev_total_cache[cat]
+
                 feats = [
                     float(cal_row["days_left"]),
                     float(cal_row["work_days_left"]),
@@ -267,16 +300,11 @@ def plot_val_mape_by_day(
                     float(cal_row["work_days_passed"]),
                     float(cal_row["is_weekend"]),
                     cumulative,
-                    get_rolling_sum(wide_df, day_date, cat, 7),
-                    get_rolling_sum(wide_df, day_date, cat, 14),
-                    get_rolling_sum(wide_df, day_date, cat, 28),
-                    get_rolling_sum(wcd, day_date, cat, 3),
-                    get_rolling_sum(wcd, day_date, cat, 7),
-                    get_rolling_sum(wcd, day_date, cat, 10),
-                    get_rolling_sum(wcd, day_date, cat, 14),
-                    get_cumulative_to_day(wide_df, year - 1, month, cat, t),
-                    get_month_total(wide_df, year - 1, month, cat),
-                    get_previous_month_total(wide_df, year, month, cat),
+                    s7, s14, s28,
+                    cs3, cs7, cs10, cs14,
+                    lastyear_cumul,
+                    lastyear_month_total,
+                    prev_month_total,
                     float(year),
                     float(year * 12 + month),
                     float(day_date.toordinal()),
@@ -301,6 +329,7 @@ def plot_val_mape_by_day(
             predicted_totals.append(predicted_total)
 
         mean_mape = np.mean(mapes) if mapes else 0.0
+        print(f" mean MAPE={mean_mape:.1f}%")
         ax.plot(days, mapes, color=line_color, linewidth=1.5, marker="o", markersize=3)
         ax.axhline(
             mean_mape, color="gray", linestyle="--", linewidth=1,
@@ -490,7 +519,7 @@ def train(
     blind_test_months = ym_all[-n_blind:] if n_blind > 0 else []
     ym_for_val = ym_all[:-n_blind] if n_blind > 0 else ym_all
     n_val = min(val_months_count, max(0, len(ym_for_val) - 1))
-    val_months = ym_for_val[-n_val:]
+    val_months = ym_for_val[-n_val:] if n_val > 0 else []
 
     # Загружаем лучшую модель для честного инференса
     from model import load_model as _load_model

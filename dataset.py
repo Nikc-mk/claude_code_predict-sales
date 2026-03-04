@@ -206,6 +206,8 @@ class TabularDataset(Dataset):
 
     def _apply_scaler(self) -> None:
         """Применяет scaler к числовым признакам в self._raw_samples."""
+        if not self._raw_samples:
+            return
         X = np.array([s["features"] for s in self._raw_samples], dtype=np.float32)
         X_scaled = self.scaler.transform(X)
         for i, s in enumerate(self._raw_samples):
