@@ -200,35 +200,43 @@ def plot_val_mape_by_day(
     artifacts_dir: str,
     device: torch.device,
     wide_create_df: pd.DataFrame | None = None,
+    blind_test_months: list[tuple[int, int]] | None = None,
 ) -> str:
     """
-    Строит график MAPE по дням месяца для каждого валидационного месяца.
+    Строит график MAPE по дням месяца для валидационных и слепых тестовых месяцев.
 
-    Логика для каждого дня t в месяце:
-      predicted_total = sum по всем категориям(cumulative_1_to_t + predicted_remaining)
-      actual_total    = sum по всем категориям(итог за весь месяц)
-      MAPE_t = |actual_total - predicted_total| / |actual_total| * 100
+    val_months      — синие графики (валидация)
+    blind_test_months — оранжевые графики (слепой тест)
 
+    В CSV добавляется колонка split: "val" | "blind_test".
     Сохраняет: artifacts/val_mape_by_day.png
     """
-    from calendar import monthrange
+    if blind_test_months is None:
+        blind_test_months = []
+
+    # Все месяцы: сначала val, потом blind_test
+    all_months = [(ym, "val") for ym in val_months] + [(ym, "blind_test") for ym in blind_test_months]
+    n_months = len(all_months)
+    if n_months == 0:
+        return ""
 
     cat2idx = {c: i for i, c in enumerate(categories)}
-    n_months = len(val_months)
 
     fig, axes = plt.subplots(1, n_months, figsize=(6 * n_months, 5), squeeze=False)
     fig.suptitle(
-        "Val MAPE по дням месяца (агрегировано по всем категориям)",
+        "MAPE по дням месяца (агрегировано по всем категориям)",
         fontsize=13, fontweight="bold"
     )
 
     model.eval()
     all_records = []
 
-    for col, (year, month) in enumerate(val_months):
+    for col, ((year, month), split) in enumerate(all_months):
         ax = axes[0, col]
         _, n_days = monthrange(year, month)
         cal = build_calendar_df(year, month)
+
+        line_color = "#4C72B0" if split == "val" else "#DD8452"
 
         # Фактический итог за весь месяц (сумма по всем категориям)
         actual_total = sum(get_month_total(wide_df, year, month, cat) for cat in categories)
@@ -293,18 +301,20 @@ def plot_val_mape_by_day(
             predicted_totals.append(predicted_total)
 
         mean_mape = np.mean(mapes) if mapes else 0.0
-        ax.plot(days, mapes, color="#4C72B0", linewidth=1.5, marker="o", markersize=3)
+        ax.plot(days, mapes, color=line_color, linewidth=1.5, marker="o", markersize=3)
         ax.axhline(
             mean_mape, color="gray", linestyle="--", linewidth=1,
             label=f"Средняя MAPE = {mean_mape:.1f}%"
         )
-        ax.set_title(f"{year}-{month:02d}  (факт={actual_total:,.0f})")
+        split_label = "val" if split == "val" else "blind test"
+        ax.set_title(f"{year}-{month:02d}  ({split_label}, факт={actual_total:,.0f})")
         ax.set_xlabel("День месяца")
         ax.set_ylabel("MAPE (%)")
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
         all_records.append(pd.DataFrame({
+            "split": split,
             "year": year,
             "month": month,
             "day": days,
@@ -336,6 +346,7 @@ def train(
     lr: float = TRAIN_CONFIG["lr"],
     weight_decay: float = TRAIN_CONFIG["weight_decay"],
     val_months_count: int = TRAIN_CONFIG["val_months_count"],
+    blind_test_months_count: int = TRAIN_CONFIG["blind_test_months_count"],
     patience: int = TRAIN_CONFIG["patience"],
     huber_delta: float = TRAIN_CONFIG["huber_delta"],
     artifacts_dir: str = PATHS["artifacts_dir"],
@@ -359,8 +370,9 @@ def train(
     # --- 2. Датасет ---
     print("Building datasets...")
     t0 = time.time()
-    train_ds, val_ds = TabularDataset.train_val_split(
-        wide_df, categories, wide_create_df=wide_create_df, val_months_count=val_months_count
+    train_ds, val_ds, blind_test_ds = TabularDataset.train_val_split(
+        wide_df, categories, wide_create_df=wide_create_df,
+        val_months_count=val_months_count, blind_test_months_count=blind_test_months_count,
     )
     print(f"  Built in {time.time() - t0:.1f}s")
 
@@ -382,6 +394,7 @@ def train(
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    has_val = len(val_ds) > 0
 
     # --- 3. Модель ---
     model = build_model(n_categories=len(categories)).to(device)
@@ -399,16 +412,20 @@ def train(
     log_path = os.path.join(artifacts_dir, "training_log.csv")
 
     log_rows = []
-    print(f"\n{'Epoch':>5}  {'Train Loss':>11}  {'Val Loss':>10}  {'Val SMAPE':>10}  {'Val MAE':>12}  {'LR':>10}")
+    val_col_header = "Val Loss" if has_val else "Tr.Loss*"
+    print(f"\n{'Epoch':>5}  {'Train Loss':>11}  {val_col_header:>10}  {'Val SMAPE':>10}  {'Val MAE':>12}  {'LR':>10}")
     print("-" * 75)
 
     for epoch in range(1, epochs + 1):
         t_loss, _, _ = run_epoch(
             model, train_loader, criterion, optimizer, device, scaler_mean, scaler_std
         )
-        v_loss, v_smape, v_mae = run_epoch(
-            model, val_loader, criterion, None, device, scaler_mean, scaler_std
-        )
+        if has_val:
+            v_loss, v_smape, v_mae = run_epoch(
+                model, val_loader, criterion, None, device, scaler_mean, scaler_std
+            )
+        else:
+            v_loss, v_smape, v_mae = t_loss, 0.0, 0.0
 
         current_lr = optimizer.param_groups[0]["lr"]
         scheduler.step(v_loss)
@@ -442,7 +459,8 @@ def train(
                     "val_mae": v_mae,
                 },
             )
-            print(f"  ✓ Saved best model (val_loss={v_loss:.4f})")
+            loss_label = "val_loss" if has_val else "train_loss"
+            print(f"  ✓ Saved best model ({loss_label}={v_loss:.4f})")
 
     # --- 5. Сохраняем лог ---
     with open(log_path, "w", newline="", encoding="utf-8") as f:
@@ -459,7 +477,7 @@ def train(
 
     # --- 7. Визуализация MAPE по дням валидационных месяцев ---
     print("\nBuilding val MAPE plot...")
-    # Вычисляем список val-месяцев (та же логика, что в train_val_split)
+    # Вычисляем списки месяцев для графика (та же логика, что в train_val_split)
     ym_all = sorted(
         {(d.year, d.month) for d in wide_df.index},
         key=lambda x: (x[0], x[1]),
@@ -468,8 +486,11 @@ def train(
     _, last_day = monthrange(today.year, today.month)
     if ym_all and ym_all[-1] == (today.year, today.month) and today.day < last_day:
         ym_all = ym_all[:-1]
-    n_val = min(val_months_count, len(ym_all) - 1)
-    val_months = ym_all[-n_val:]
+    n_blind = min(blind_test_months_count, max(0, len(ym_all) - 2))
+    blind_test_months = ym_all[-n_blind:] if n_blind > 0 else []
+    ym_for_val = ym_all[:-n_blind] if n_blind > 0 else ym_all
+    n_val = min(val_months_count, max(0, len(ym_for_val) - 1))
+    val_months = ym_for_val[-n_val:]
 
     # Загружаем лучшую модель для честного инференса
     from model import load_model as _load_model
@@ -484,6 +505,7 @@ def train(
         artifacts_dir=artifacts_dir,
         device=device,
         wide_create_df=wide_create_df,
+        blind_test_months=blind_test_months,
     )
     print(f"Val MAPE plot saved → {mape_plot_path}")
 

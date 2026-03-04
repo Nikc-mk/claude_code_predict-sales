@@ -261,10 +261,18 @@ class TabularDataset(Dataset):
         categories: list[str],
         wide_create_df: Optional[pd.DataFrame] = None,
         val_months_count: int = 3,
-    ) -> tuple["TabularDataset", "TabularDataset"]:
+        blind_test_months_count: int = 0,
+    ) -> tuple["TabularDataset", "TabularDataset", Optional["TabularDataset"]]:
         """
-        Разбивает данные по времени: последние val_months_count месяцев — валидация.
-        Скейлер фитируется ТОЛЬКО на тренировочных данных, затем применяется к обоим.
+        Разбивает данные по времени на train / val / blind_test.
+
+        Порядок отсечения (от конца):
+          1. blind_test_months_count последних завершённых месяцев → слепой тест
+          2. val_months_count следующих (перед blind_test) → валидация
+          3. остаток → обучение
+
+        Скейлер фитируется ТОЛЬКО на тренировочных данных.
+        Возвращает (train_ds, val_ds, blind_test_ds), где blind_test_ds=None если blind=0.
         """
         dates = wide_df.index
         ym_pairs = sorted(
@@ -280,28 +288,40 @@ class TabularDataset(Dataset):
             ym_pairs = ym_pairs[:-1]
 
         n_total = len(ym_pairs)
-        n_val = min(val_months_count, n_total - 1)  # не менее 1 месяца на train
-        n_train = n_total - n_val
 
-        train_months = set(ym_pairs[:n_train])
-        val_months = set(ym_pairs[n_train:])
+        # Слепой тест: последние n_blind месяцев
+        n_blind = min(blind_test_months_count, max(0, n_total - 2))
+        blind_ym = set(ym_pairs[-n_blind:]) if n_blind > 0 else set()
+        ym_before_blind = ym_pairs[:-n_blind] if n_blind > 0 else ym_pairs
+
+        # Валидация: n_val месяцев перед blind_test
+        n_val = min(val_months_count, max(0, len(ym_before_blind) - 1))
+        val_ym = set(ym_before_blind[-n_val:]) if n_val > 0 else set()
+        train_ym = set(ym_before_blind[:-n_val]) if n_val > 0 else set(ym_before_blind)
 
         def _filter_wide(wdf, months_set):
             mask = [(d.year, d.month) in months_set for d in wdf.index]
             return wdf.loc[mask]
 
-        train_wide = _filter_wide(wide_df, train_months)
-        val_wide = _filter_wide(wide_df, val_months)
+        train_wide = _filter_wide(wide_df, train_ym)
+        val_wide = _filter_wide(wide_df, val_ym)
 
-        train_create = _filter_wide(wide_create_df, train_months) if wide_create_df is not None else None
-        val_create = _filter_wide(wide_create_df, val_months) if wide_create_df is not None else None
+        train_create = _filter_wide(wide_create_df, train_ym) if wide_create_df is not None else None
+        val_create = _filter_wide(wide_create_df, val_ym) if wide_create_df is not None else None
 
         # Обучаем скейлер только на train
         train_ds = TabularDataset(train_wide, categories, wide_create_df=train_create, scaler=None, fit_on_init=True)
         val_ds = TabularDataset(val_wide, categories, wide_create_df=val_create, scaler=train_ds.scaler, fit_on_init=False)
 
+        blind_ds = None
+        if n_blind > 0:
+            blind_wide = _filter_wide(wide_df, blind_ym)
+            blind_create = _filter_wide(wide_create_df, blind_ym) if wide_create_df is not None else None
+            blind_ds = TabularDataset(blind_wide, categories, wide_create_df=blind_create, scaler=train_ds.scaler, fit_on_init=False)
+
         print(
-            f"Dataset split: {len(train_months)} train months ({len(train_ds)} samples), "
-            f"{len(val_months)} val months ({len(val_ds)} samples)"
+            f"Dataset split: {len(train_ym)} train months ({len(train_ds)} samples), "
+            f"{len(val_ym)} val months ({len(val_ds)} samples)"
+            + (f", {n_blind} blind_test months ({len(blind_ds)} samples)" if blind_ds else "")
         )
-        return train_ds, val_ds
+        return train_ds, val_ds, blind_ds
