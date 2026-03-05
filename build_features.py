@@ -37,7 +37,10 @@ def load_raw_data(path: str) -> pd.DataFrame:
     if "create_sale" in df.columns:
         create_raw = "create_sale"
     else:
-        create_raw = next((c for c in df.columns if "create" in c.lower()), None)
+        create_raw = next((c for c in df.columns if "create" in c.lower() and "margin" not in c.lower()), None)
+
+    # Ищем колонку profit ДО rename
+    profit_raw = "profit" if "profit" in df.columns else None
 
     col_map = _detect_columns(df.columns.tolist())
     df = df.rename(columns=col_map)
@@ -49,6 +52,13 @@ def load_raw_data(path: str) -> pd.DataFrame:
         create_series = df[create_renamed].copy()
     else:
         create_series = None
+
+    # Сохраняем profit до среза
+    if profit_raw is not None:
+        profit_renamed = col_map.get(profit_raw, profit_raw)
+        profit_series = df[profit_renamed].copy()
+    else:
+        profit_series = None
 
     df = df[["date", "category", "sales"]]
 
@@ -67,6 +77,11 @@ def load_raw_data(path: str) -> pd.DataFrame:
         df["create_sale"] = _clean_numeric(create_series).values
     else:
         df["create_sale"] = 0.0
+
+    if profit_series is not None:
+        df["profit"] = _clean_numeric(profit_series).values
+    else:
+        df["profit"] = 0.0
 
     # Парсинг даты
     df["date"] = _parse_dates(df["date"])

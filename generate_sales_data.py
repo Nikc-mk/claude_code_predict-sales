@@ -39,11 +39,21 @@ def generate_sales_data():
             sales = 100 + (hash(f"{current_date}{category}") % 49900)
             # Генерация create_sale (больше sales, от sales + 1 до sales + 50000)
             create_sale = sales + 1 + (hash(f"{current_date}{category}_create") % 49900)
+            # Profit: от -5% до 55% от sales (натуральное значение)
+            profit_pct = -0.05 + (abs(hash(f"{current_date}{category}_profit")) % 10001) / 10000 * 0.60
+            profit = round(sales * profit_pct)
+            # create_sale_margin: от -0.10 до 0.70
+            create_sale_margin = round(
+                -0.10 + (abs(hash(f"{current_date}{category}_margin")) % 10001) / 10000 * 0.80,
+                4
+            )
             rows.append({
                 "date": current_date.isoformat(),
                 "category": category,
                 "sales": sales,
-                "create_sale": create_sale
+                "create_sale": create_sale,
+                "profit": profit,
+                "create_sale_margin": create_sale_margin,
             })
         current_date += timedelta(days=1)
     
@@ -51,7 +61,7 @@ def generate_sales_data():
     
     # Запись в CSV
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales", "create_sale"], delimiter=";")
+        writer = csv.DictWriter(f, fieldnames=["date", "category", "sales", "create_sale", "profit", "create_sale_margin"], delimiter=";")
         writer.writeheader()
         writer.writerows(rows)
     

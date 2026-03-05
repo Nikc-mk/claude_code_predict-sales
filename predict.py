@@ -95,6 +95,7 @@ def predict_current_month(
 
     wide_df = pivot_to_wide(df, categories=categories)
     wide_create_df = pivot_to_wide(df, categories=categories, value_col="create_sale")
+    wide_profit_df = pivot_to_wide(df, categories=categories, value_col="profit")
 
     # --- 2. Загрузка модели и скейлера ---
     model, checkpoint = load_model(model_path, device=device)
@@ -126,12 +127,20 @@ def predict_current_month(
             day_date=day_date,
             cal_row=cal_row,
             wide_create_df=wide_create_df,
+            wide_profit_df=wide_profit_df,
         )
         records.append(feat)
 
     X_raw = np.array([r["features"] for r in records], dtype=np.float32)
     cat_ids = np.array([cat2idx[r["category"]] for r in records], dtype=np.int64)
     cumulative_sales = np.array([r["cumulative"] for r in records], dtype=np.float64)
+
+    # Накопленная прибыль по каждой категории
+    from build_features import get_month_sales as _gms
+    cumulative_profit = np.array(
+        [float(_gms(wide_profit_df, year, month, cat).iloc[:t_eff].sum()) for cat in categories],
+        dtype=np.float64,
+    )
 
     # --- 5. Нормализация числовых признаков ---
     X_scaled = scaler.transform(X_raw)
@@ -141,18 +150,25 @@ def predict_current_month(
     cat_tensor = torch.tensor(cat_ids, dtype=torch.long).to(device)
 
     with torch.no_grad():
-        predicted_remaining = model(X_tensor, cat_tensor).cpu().numpy()
+        raw_output = model(X_tensor, cat_tensor).cpu().numpy()  # (n_cats, 2)
+
+    predicted_remaining_sales  = raw_output[:, 0]
+    predicted_remaining_profit = raw_output[:, 1]
 
     # --- 7. Формируем итоговую таблицу ---
     results = []
     for i, cat in enumerate(categories):
-        total_forecast = cumulative_sales[i] + predicted_remaining[i]
+        total_forecast = cumulative_sales[i] + predicted_remaining_sales[i]
+        total_profit_forecast = cumulative_profit[i] + predicted_remaining_profit[i]
         results.append(
             {
                 "category": cat,
                 "fact_so_far": round(cumulative_sales[i], 0),
-                "predicted_remaining": round(float(predicted_remaining[i]), 0),
+                "predicted_remaining": round(float(predicted_remaining_sales[i]), 0),
                 "total_forecast": round(float(total_forecast), 0),
+                "fact_profit_so_far": round(cumulative_profit[i], 0),
+                "predicted_remaining_profit": round(float(predicted_remaining_profit[i]), 0),
+                "total_profit_forecast": round(float(total_profit_forecast), 0),
                 "days_passed": t,
                 "days_left": days_left,
             }
@@ -185,6 +201,7 @@ def _compute_inference_features(
     day_date: pd.Timestamp,
     cal_row: pd.Series,
     wide_create_df: pd.DataFrame | None = None,
+    wide_profit_df: pd.DataFrame | None = None,
 ) -> dict:
     """Аналог TabularDataset._compute_features, но для одной категории."""
     from build_features import get_month_sales, get_month_total
@@ -205,6 +222,20 @@ def _compute_inference_features(
     lastyear_cumul = get_cumulative_to_day(wide_df, year - 1, month, cat, t)
     lastyear_month_total = get_month_total(wide_df, year - 1, month, cat)
     prev_month_total = get_previous_month_total(wide_df, year, month, cat)
+
+    # Profit-признаки
+    if wide_profit_df is not None:
+        month_profit = get_month_sales(wide_profit_df, year, month, cat)
+        cumulative_profit           = float(month_profit.iloc[:t].sum())
+        profit_7                    = get_rolling_sum(wide_profit_df, day_date, cat, 7)
+        profit_14                   = get_rolling_sum(wide_profit_df, day_date, cat, 14)
+        profit_28                   = get_rolling_sum(wide_profit_df, day_date, cat, 28)
+        lastyear_profit_cumul       = get_cumulative_to_day(wide_profit_df, year - 1, month, cat, t)
+        lastyear_profit_month_total = get_month_total(wide_profit_df, year - 1, month, cat)
+        prev_profit_month_total     = get_previous_month_total(wide_profit_df, year, month, cat)
+    else:
+        cumulative_profit = profit_7 = profit_14 = profit_28 = 0.0
+        lastyear_profit_cumul = lastyear_profit_month_total = prev_profit_month_total = 0.0
 
     features = [
         float(cal_row["days_left"]),
@@ -228,6 +259,13 @@ def _compute_inference_features(
         float(day_date.toordinal()),
         float(cal_row["month_sin"]),
         float(cal_row["month_cos"]),
+        cumulative_profit,
+        profit_7,
+        profit_14,
+        profit_28,
+        lastyear_profit_cumul,
+        lastyear_profit_month_total,
+        prev_profit_month_total,
     ]
     return {"category": cat, "features": features, "cumulative": cumulative}
 
@@ -237,25 +275,36 @@ def _compute_inference_features(
 # ---------------------------------------------------------------------------
 
 def _print_results(df: pd.DataFrame, year: int, month: int, as_of: date) -> None:
-    print(f"\n{'='*70}")
-    print(f"  Прогноз продаж за {year}-{month:02d}  |  Дата расчёта: {as_of}")
-    print(f"{'='*70}")
+    W = 90
+    print(f"\n{'='*W}")
+    print(f"  Прогноз продаж и прибыли за {year}-{month:02d}  |  Дата расчёта: {as_of}")
+    print(f"{'='*W}")
     print(
-        f"{'Категория':<12}  {'Факт 1-t':>14}  {'Прогноз остатка':>16}  {'Итоговый прогноз':>17}"
+        f"{'Категория':<12}  {'Факт продажи':>14}  {'Остаток':>12}  {'Итог продажи':>13}"
+        f"  {'Факт прибыль':>14}  {'Остаток':>12}  {'Итог прибыль':>13}"
     )
-    print("-" * 70)
+    print("-" * W)
     for _, row in df.iterrows():
         print(
             f"{row['category']:<12}  "
             f"{row['fact_so_far']:>14,.0f}  "
-            f"{row['predicted_remaining']:>16,.0f}  "
-            f"{row['total_forecast']:>17,.0f}"
+            f"{row['predicted_remaining']:>12,.0f}  "
+            f"{row['total_forecast']:>13,.0f}  "
+            f"{row['fact_profit_so_far']:>14,.0f}  "
+            f"{row['predicted_remaining_profit']:>12,.0f}  "
+            f"{row['total_profit_forecast']:>13,.0f}"
         )
-    print("-" * 70)
-    total = df["total_forecast"].sum()
-    total_fact = df["fact_so_far"].sum()
-    print(f"{'ИТОГО':<12}  {total_fact:>14,.0f}  {'':>16}  {total:>17,.0f}")
-    print(f"{'='*70}\n")
+    print("-" * W)
+    print(
+        f"{'ИТОГО':<12}  "
+        f"{df['fact_so_far'].sum():>14,.0f}  "
+        f"{'':>12}  "
+        f"{df['total_forecast'].sum():>13,.0f}  "
+        f"{df['fact_profit_so_far'].sum():>14,.0f}  "
+        f"{'':>12}  "
+        f"{df['total_profit_forecast'].sum():>13,.0f}"
+    )
+    print(f"{'='*W}\n")
 
 
 # ---------------------------------------------------------------------------

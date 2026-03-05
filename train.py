@@ -66,29 +66,32 @@ def run_epoch(
     device: torch.device,
     scaler_mean: float = 0.0,
     scaler_std: float = 1.0,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, float, float]:
     """
     Выполняет один проход (train или eval).
 
     Returns
     -------
     avg_loss : float
-    smape_val : float (%)
-    mae_val : float
+    smape_sales : float (%)
+    mae_sales : float
+    smape_profit : float (%)
+    mae_profit : float
     """
     is_train = optimizer is not None
     model.train(is_train)
 
     total_loss = 0.0
-    all_true, all_pred = [], []
+    all_true_sales, all_pred_sales = [], []
+    all_true_profit, all_pred_profit = [], []
 
     with torch.set_grad_enabled(is_train):
         for X, cat_ids, y in loader:
             X = X.to(device)
             cat_ids = cat_ids.to(device)
-            y = y.to(device)
+            y = y.to(device)  # (B, 2)
 
-            preds = model(X, cat_ids)
+            preds = model(X, cat_ids)  # (B, 2)
             loss = criterion(preds, y)
 
             if is_train:
@@ -99,16 +102,26 @@ def run_epoch(
 
             total_loss += loss.item() * len(y)
 
-            # Переводим в исходный масштаб для метрик
-            preds_orig = preds.detach().cpu().numpy() * scaler_std + scaler_mean
-            y_orig = y.detach().cpu().numpy() * scaler_std + scaler_mean
-            all_pred.append(preds_orig)
-            all_true.append(y_orig)
+            # Переводим в исходный масштаб для метрик (таргеты не нормализованы)
+            p = preds.detach().cpu().numpy()
+            t = y.detach().cpu().numpy()
+            all_pred_sales.append(p[:, 0] * scaler_std + scaler_mean)
+            all_true_sales.append(t[:, 0] * scaler_std + scaler_mean)
+            all_pred_profit.append(p[:, 1])
+            all_true_profit.append(t[:, 1])
 
-    all_pred = np.concatenate(all_pred)
-    all_true = np.concatenate(all_true)
+    pred_sales = np.concatenate(all_pred_sales)
+    true_sales = np.concatenate(all_true_sales)
+    pred_profit = np.concatenate(all_pred_profit)
+    true_profit = np.concatenate(all_true_profit)
     avg_loss = total_loss / len(loader.dataset)
-    return avg_loss, smape(all_true, all_pred), mae(all_true, all_pred)
+    return (
+        avg_loss,
+        smape(true_sales, pred_sales),
+        mae(true_sales, pred_sales),
+        smape(true_profit, pred_profit),
+        mae(true_profit, pred_profit),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -201,14 +214,17 @@ def plot_val_mape_by_day(
     device: torch.device,
     wide_create_df: pd.DataFrame | None = None,
     blind_test_months: list[tuple[int, int]] | None = None,
+    wide_profit_df: pd.DataFrame | None = None,
 ) -> str:
     """
     Строит график MAPE по дням месяца для валидационных и слепых тестовых месяцев.
 
-    val_months      — синие графики (валидация)
+    val_months        — синие графики (валидация)
     blind_test_months — оранжевые графики (слепой тест)
 
-    В CSV добавляется колонка split: "val" | "blind_test".
+    Ряд 0: MAPE по продажам (sales)
+    Ряд 1: MAPE по прибыли (profit)
+
     Сохраняет: artifacts/val_mape_by_day.png
     """
     if blind_test_months is None:
@@ -221,8 +237,9 @@ def plot_val_mape_by_day(
         return ""
 
     cat2idx = {c: i for i, c in enumerate(categories)}
+    has_profit = wide_profit_df is not None
 
-    fig, axes = plt.subplots(1, n_months, figsize=(6 * n_months, 5), squeeze=False)
+    fig, axes = plt.subplots(2, n_months, figsize=(6 * n_months, 10), squeeze=False)
     fig.suptitle(
         "MAPE по дням месяца (агрегировано по всем категориям)",
         fontsize=13, fontweight="bold"
@@ -232,7 +249,8 @@ def plot_val_mape_by_day(
     all_records = []
 
     for col, ((year, month), split) in enumerate(all_months):
-        ax = axes[0, col]
+        ax_sales  = axes[0, col]
+        ax_profit = axes[1, col]
         _, n_days = monthrange(year, month)
         cal = build_calendar_df(year, month)
 
@@ -241,16 +259,28 @@ def plot_val_mape_by_day(
         # Фактический итог за весь месяц (сумма по всем категориям)
         actual_total = sum(get_month_total(wide_df, year, month, cat) for cat in categories)
         if abs(actual_total) < 1:
-            ax.set_title(f"{year}-{month:02d}  (нет данных)")
+            ax_sales.set_title(f"{year}-{month:02d}  (нет данных)")
+            ax_profit.set_title(f"{year}-{month:02d}  (нет данных)")
             continue
 
+        actual_profit_total = (
+            sum(get_month_total(wide_profit_df, year, month, cat) for cat in categories)
+            if has_profit else 0.0
+        )
+
         days, mapes, predicted_totals = [], [], []
+        mapes_profit, predicted_profit_totals = [], []
 
         # --- Предвычисления (не меняются с t) ---
         month_sales_cache    = {cat: get_month_sales(wide_df, year, month, cat)     for cat in categories}
         lastyear_ms_cache    = {cat: get_month_sales(wide_df, year - 1, month, cat) for cat in categories}
         lastyear_total_cache = {cat: float(lastyear_ms_cache[cat].sum())             for cat in categories}
         prev_total_cache     = {cat: get_previous_month_total(wide_df, year, month, cat) for cat in categories}
+
+        if has_profit:
+            month_profit_cache        = {cat: get_month_sales(wide_profit_df, year, month, cat)     for cat in categories}
+            lastyear_profit_ms_cache  = {cat: get_month_sales(wide_profit_df, year - 1, month, cat) for cat in categories}
+            prev_profit_cache         = {cat: get_previous_month_total(wide_profit_df, year, month, cat) for cat in categories}
 
         # Векторизованные скользящие суммы по всем дням месяца сразу
         wcd = wide_create_df if wide_create_df is not None else wide_df
@@ -266,6 +296,12 @@ def plot_val_mape_by_day(
         c_roll10 = wcd_win.rolling(10, min_periods=1).sum()
         c_roll14 = wcd_win.rolling(14, min_periods=1).sum()
 
+        if has_profit:
+            pft_win   = wide_profit_df.loc[roll_start:month_end_ts]
+            p_roll7   = pft_win.rolling(7,  min_periods=1).sum()
+            p_roll14  = pft_win.rolling(14, min_periods=1).sum()
+            p_roll28  = pft_win.rolling(28, min_periods=1).sum()
+
         print(f"  {year}-{month:02d} ({split})...", end="", flush=True)
 
         for t in range(1, n_days):  # t=1..T-1 (последний день — только факт)
@@ -276,10 +312,16 @@ def plot_val_mape_by_day(
 
             # Признаки для всех категорий сразу
             X_list, cumulative_total = [], 0.0
+            cumulative_profit_total = 0.0
             for cat in categories:
                 month_sales = month_sales_cache[cat]
                 cumulative  = float(month_sales.iloc[:t].sum())
                 cumulative_total += cumulative
+
+                cumul_profit = 0.0
+                if has_profit:
+                    cumul_profit = float(month_profit_cache[cat].iloc[:t].sum())
+                    cumulative_profit_total += cumul_profit
 
                 s7   = float(roll7.at[day_date,   cat]) if day_date in roll7.index   else 0.0
                 s14  = float(roll14.at[day_date,  cat]) if day_date in roll14.index  else 0.0
@@ -292,6 +334,18 @@ def plot_val_mape_by_day(
                 lastyear_cumul       = float(lastyear_ms_cache[cat].iloc[:t].sum())
                 lastyear_month_total = lastyear_total_cache[cat]
                 prev_month_total     = prev_total_cache[cat]
+
+                # Profit rolling sums
+                if has_profit:
+                    p7   = float(p_roll7.at[day_date,  cat]) if day_date in p_roll7.index  else 0.0
+                    p14  = float(p_roll14.at[day_date, cat]) if day_date in p_roll14.index else 0.0
+                    p28  = float(p_roll28.at[day_date, cat]) if day_date in p_roll28.index else 0.0
+                    lastyear_profit_cumul = float(lastyear_profit_ms_cache[cat].iloc[:t].sum())
+                    lastyear_profit_total = float(lastyear_profit_ms_cache[cat].sum())
+                    prev_profit_total     = prev_profit_cache[cat]
+                else:
+                    p7 = p14 = p28 = 0.0
+                    lastyear_profit_cumul = lastyear_profit_total = prev_profit_total = 0.0
 
                 feats = [
                     float(cal_row["days_left"]),
@@ -310,6 +364,11 @@ def plot_val_mape_by_day(
                     float(day_date.toordinal()),
                     float(cal_row["month_sin"]),
                     float(cal_row["month_cos"]),
+                    cumul_profit,
+                    p7, p14, p28,
+                    lastyear_profit_cumul,
+                    lastyear_profit_total,
+                    prev_profit_total,
                 ]
                 X_list.append(feats)
 
@@ -320,27 +379,54 @@ def plot_val_mape_by_day(
                 preds = model(
                     torch.tensor(X_scaled, dtype=torch.float32).to(device),
                     torch.tensor(cat_ids, dtype=torch.long).to(device),
-                ).cpu().numpy()
+                ).cpu().numpy()  # (n_cats, 2)
 
-            predicted_total = cumulative_total + float(preds.sum())
+            # Sales MAPE
+            predicted_total = cumulative_total + float(preds[:, 0].sum())
             mape_t = abs(actual_total - predicted_total) / abs(actual_total) * 100
             days.append(t)
             mapes.append(mape_t)
             predicted_totals.append(predicted_total)
 
+            # Profit MAPE
+            if has_profit and abs(actual_profit_total) > 1:
+                predicted_profit_total = cumulative_profit_total + float(preds[:, 1].sum())
+                mape_profit_t = abs(actual_profit_total - predicted_profit_total) / abs(actual_profit_total) * 100
+            else:
+                predicted_profit_total = 0.0
+                mape_profit_t = 0.0
+            mapes_profit.append(mape_profit_t)
+            predicted_profit_totals.append(predicted_profit_total)
+
         mean_mape = np.mean(mapes) if mapes else 0.0
-        print(f" mean MAPE={mean_mape:.1f}%")
-        ax.plot(days, mapes, color=line_color, linewidth=1.5, marker="o", markersize=3)
-        ax.axhline(
+        mean_mape_profit = np.mean(mapes_profit) if mapes_profit else 0.0
+        print(f" sales MAPE={mean_mape:.1f}%  profit MAPE={mean_mape_profit:.1f}%")
+
+        split_label = "val" if split == "val" else "blind test"
+
+        # --- Ряд 0: Sales MAPE ---
+        ax_sales.plot(days, mapes, color=line_color, linewidth=1.5, marker="o", markersize=3)
+        ax_sales.axhline(
             mean_mape, color="gray", linestyle="--", linewidth=1,
             label=f"Средняя MAPE = {mean_mape:.1f}%"
         )
-        split_label = "val" if split == "val" else "blind test"
-        ax.set_title(f"{year}-{month:02d}  ({split_label}, факт={actual_total:,.0f})")
-        ax.set_xlabel("День месяца")
-        ax.set_ylabel("MAPE (%)")
-        ax.legend(fontsize=9)
-        ax.grid(True, alpha=0.3)
+        ax_sales.set_title(f"{year}-{month:02d}  ({split_label})\nПродажи, факт={actual_total:,.0f}")
+        ax_sales.set_xlabel("День месяца")
+        ax_sales.set_ylabel("MAPE (%)")
+        ax_sales.legend(fontsize=9)
+        ax_sales.grid(True, alpha=0.3)
+
+        # --- Ряд 1: Profit MAPE ---
+        ax_profit.plot(days, mapes_profit, color=line_color, linewidth=1.5, marker="o", markersize=3)
+        ax_profit.axhline(
+            mean_mape_profit, color="gray", linestyle="--", linewidth=1,
+            label=f"Средняя MAPE = {mean_mape_profit:.1f}%"
+        )
+        ax_profit.set_title(f"{year}-{month:02d}  ({split_label})\nПрибыль, факт={actual_profit_total:,.0f}")
+        ax_profit.set_xlabel("День месяца")
+        ax_profit.set_ylabel("MAPE (%)")
+        ax_profit.legend(fontsize=9)
+        ax_profit.grid(True, alpha=0.3)
 
         all_records.append(pd.DataFrame({
             "split": split,
@@ -350,6 +436,9 @@ def plot_val_mape_by_day(
             "actual_total": actual_total,
             "predicted_total": [round(v, 0) for v in predicted_totals],
             "mape_pct": [round(v, 4) for v in mapes],
+            "actual_profit_total": actual_profit_total,
+            "predicted_profit_total": [round(v, 0) for v in predicted_profit_totals],
+            "mape_profit_pct": [round(v, 4) for v in mapes_profit],
         }))
 
     plt.tight_layout()
@@ -394,13 +483,14 @@ def train(
 
     wide_df = pivot_to_wide(df, categories=categories)
     wide_create_df = pivot_to_wide(df, categories=categories, value_col="create_sale")
+    wide_profit_df = pivot_to_wide(df, categories=categories, value_col="profit")
     print(f"  Wide shape: {wide_df.shape}")
 
     # --- 2. Датасет ---
     print("Building datasets...")
     t0 = time.time()
     train_ds, val_ds, blind_test_ds = TabularDataset.train_val_split(
-        wide_df, categories, wide_create_df=wide_create_df,
+        wide_df, categories, wide_create_df=wide_create_df, wide_profit_df=wide_profit_df,
         val_months_count=val_months_count, blind_test_months_count=blind_test_months_count,
     )
     print(f"  Built in {time.time() - t0:.1f}s")
@@ -442,19 +532,19 @@ def train(
 
     log_rows = []
     val_col_header = "Val Loss" if has_val else "Tr.Loss*"
-    print(f"\n{'Epoch':>5}  {'Train Loss':>11}  {val_col_header:>10}  {'Val SMAPE':>10}  {'Val MAE':>12}  {'LR':>10}")
-    print("-" * 75)
+    print(f"\n{'Epoch':>5}  {'Train Loss':>11}  {val_col_header:>10}  {'Sales SMAPE':>12}  {'Sales MAE':>12}  {'Profit SMAPE':>13}  {'Profit MAE':>12}  {'LR':>10}")
+    print("-" * 105)
 
     for epoch in range(1, epochs + 1):
-        t_loss, _, _ = run_epoch(
+        t_loss, *_ = run_epoch(
             model, train_loader, criterion, optimizer, device, scaler_mean, scaler_std
         )
         if has_val:
-            v_loss, v_smape, v_mae = run_epoch(
+            v_loss, v_smape, v_mae, v_smape_p, v_mae_p = run_epoch(
                 model, val_loader, criterion, None, device, scaler_mean, scaler_std
             )
         else:
-            v_loss, v_smape, v_mae = t_loss, 0.0, 0.0
+            v_loss, v_smape, v_mae, v_smape_p, v_mae_p = t_loss, 0.0, 0.0, 0.0, 0.0
 
         current_lr = optimizer.param_groups[0]["lr"]
         scheduler.step(v_loss)
@@ -466,13 +556,16 @@ def train(
                 "val_loss": round(v_loss, 6),
                 "val_smape": round(v_smape, 4),
                 "val_mae": round(v_mae, 2),
+                "val_smape_profit": round(v_smape_p, 4),
+                "val_mae_profit": round(v_mae_p, 2),
                 "lr": current_lr,
             }
         )
 
         print(
             f"{epoch:>5}  {t_loss:>11.4f}  {v_loss:>10.4f}  "
-            f"{v_smape:>9.2f}%  {v_mae:>12.0f}  {current_lr:>10.2e}"
+            f"{v_smape:>11.2f}%  {v_mae:>12.0f}  "
+            f"{v_smape_p:>12.2f}%  {v_mae_p:>12.0f}  {current_lr:>10.2e}"
         )
 
         if v_loss < best_val_loss:
@@ -486,6 +579,8 @@ def train(
                     "best_epoch": epoch,
                     "val_smape": v_smape,
                     "val_mae": v_mae,
+                    "val_smape_profit": v_smape_p,
+                    "val_mae_profit": v_mae_p,
                 },
             )
             loss_label = "val_loss" if has_val else "train_loss"
@@ -535,6 +630,7 @@ def train(
         device=device,
         wide_create_df=wide_create_df,
         blind_test_months=blind_test_months,
+        wide_profit_df=wide_profit_df,
     )
     print(f"Val MAPE plot saved → {mape_plot_path}")
 

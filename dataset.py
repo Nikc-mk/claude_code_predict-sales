@@ -52,12 +52,17 @@ class TabularDataset(Dataset):
         wide_df: pd.DataFrame,
         categories: list[str],
         wide_create_df: Optional[pd.DataFrame] = None,
+        wide_profit_df: Optional[pd.DataFrame] = None,
         scaler: Optional[StandardScaler] = None,
         fit_on_init: bool = True,
     ):
         self.wide_df = wide_df
         self.wide_create_df = (
             wide_create_df if wide_create_df is not None
+            else pd.DataFrame(0.0, index=wide_df.index, columns=wide_df.columns)
+        )
+        self.wide_profit_df = (
+            wide_profit_df if wide_profit_df is not None
             else pd.DataFrame(0.0, index=wide_df.index, columns=wide_df.columns)
         )
         self.categories = categories
@@ -101,12 +106,17 @@ class TabularDataset(Dataset):
                 cat_idx = self.cat2idx[cat]
                 month_sales = get_month_sales(self.wide_df, year, month, cat)
 
+                month_profit = get_month_sales(self.wide_profit_df, year, month, cat)
+
                 for t in range(1, n_days):  # t = 1..n_days-1 (последний день — только таргет)
                     day_date = pd.Timestamp(year=year, month=month, day=t)
                     cal_row = cal.loc[day_date]
 
-                    # --- Таргет: сумма продаж с дня t+1 до конца месяца ---
+                    # --- Таргет 0: сумма продаж с дня t+1 до конца месяца ---
                     target = float(month_sales.iloc[t:].sum())
+
+                    # --- Таргет 1: сумма прибыли с дня t+1 до конца месяца ---
+                    target_profit = float(month_profit.iloc[t:].sum())
 
                     # --- Числовые признаки ---
                     features = self._compute_features(
@@ -117,13 +127,15 @@ class TabularDataset(Dataset):
                         day_date=day_date,
                         cal_row=cal_row,
                         month_sales=month_sales,
+                        month_profit=month_profit,
                     )
 
                     self._raw_samples.append(
                         {
-                            "features": features,       # list[float], len=NUM_NUMERICAL_FEATURES
-                            "category_id": cat_idx,     # int
-                            "target": target,           # float
+                            "features": features,           # list[float], len=NUM_NUMERICAL_FEATURES
+                            "category_id": cat_idx,         # int
+                            "target": target,               # float — оставшиеся продажи
+                            "target_profit": target_profit, # float — оставшаяся прибыль
                         }
                     )
 
@@ -136,17 +148,21 @@ class TabularDataset(Dataset):
         day_date: pd.Timestamp,
         cal_row: pd.Series,
         month_sales: pd.Series,
+        month_profit: pd.Series,
     ) -> list[float]:
         """
-        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (22 штуки):
+        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (28 штук):
           days_left, work_days_left, days_passed, work_days_passed, is_weekend,
           cumulative_sales, sales_last_7_days, sales_last_14_days, sales_last_28_days,
           create_sales_last_3_days, create_sales_last_7_days,
           create_sales_last_10_days, create_sales_last_14_days,
           sales_lastyear_1_to_t, sales_lastyear_month_total,
           sales_previous_month_total,
-          year, month_idx, time_idx,
-          month_sin, month_cos
+          year, month_idx, time_idx, month_sin, month_cos,
+          cumulative_profit,
+          profit_last_7_days, profit_last_14_days, profit_last_28_days,
+          profit_lastyear_1_to_t, profit_lastyear_month_total,
+          profit_previous_month_total
         """
         # Накопленная сумма с 1 по t (включительно)
         cumulative = float(month_sales.iloc[:t].sum())
@@ -168,6 +184,15 @@ class TabularDataset(Dataset):
 
         # Итог предыдущего месяца
         prev_month_total = get_previous_month_total(self.wide_df, year, month, cat)
+
+        # --- Profit-признаки ---
+        cumulative_profit = float(month_profit.iloc[:t].sum())
+        profit_7  = get_rolling_sum(self.wide_profit_df, day_date, cat, 7)
+        profit_14 = get_rolling_sum(self.wide_profit_df, day_date, cat, 14)
+        profit_28 = get_rolling_sum(self.wide_profit_df, day_date, cat, 28)
+        lastyear_profit_cumul       = get_cumulative_to_day(self.wide_profit_df, year - 1, month, cat, t)
+        lastyear_profit_month_total = get_month_total(self.wide_profit_df, year - 1, month, cat)
+        prev_profit_month_total     = get_previous_month_total(self.wide_profit_df, year, month, cat)
 
         return [
             float(cal_row["days_left"]),
@@ -191,6 +216,13 @@ class TabularDataset(Dataset):
             float(day_date.toordinal()),
             float(cal_row["month_sin"]),
             float(cal_row["month_cos"]),
+            cumulative_profit,
+            profit_7,
+            profit_14,
+            profit_28,
+            lastyear_profit_cumul,
+            lastyear_profit_month_total,
+            prev_profit_month_total,
         ]
 
     # ------------------------------------------------------------------
@@ -230,27 +262,28 @@ class TabularDataset(Dataset):
         n = len(self._raw_samples)
         self._X = np.zeros((n, NUM_NUMERICAL_FEATURES), dtype=np.float32)
         self._cat_ids = np.zeros(n, dtype=np.int64)
-        self._y = np.zeros(n, dtype=np.float32)
+        self._y = np.zeros((n, 2), dtype=np.float32)  # [target_sales, target_profit]
 
         for i, s in enumerate(self._raw_samples):
             self._X[i] = s["features"]
             self._cat_ids[i] = s["category_id"]
-            self._y[i] = s["target"]
+            self._y[i, 0] = s["target"]
+            self._y[i, 1] = s["target_profit"]
 
     def __len__(self) -> int:
         return len(self._raw_samples)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Возвращает (features, category_id, target):
+        Возвращает (features, category_id, targets):
           features     : FloatTensor (NUM_NUMERICAL_FEATURES,)
           category_id  : LongTensor  scalar
-          target       : FloatTensor scalar
+          targets      : FloatTensor (2,) — [target_sales, target_profit]
         """
         return (
             torch.from_numpy(self._X[idx]),
             torch.tensor(self._cat_ids[idx], dtype=torch.long),
-            torch.tensor(self._y[idx], dtype=torch.float32),
+            torch.from_numpy(self._y[idx]),
         )
 
     # ------------------------------------------------------------------
@@ -262,6 +295,7 @@ class TabularDataset(Dataset):
         wide_df: pd.DataFrame,
         categories: list[str],
         wide_create_df: Optional[pd.DataFrame] = None,
+        wide_profit_df: Optional[pd.DataFrame] = None,
         val_months_count: int = 3,
         blind_test_months_count: int = 0,
     ) -> tuple["TabularDataset", "TabularDataset", Optional["TabularDataset"]]:
@@ -311,15 +345,19 @@ class TabularDataset(Dataset):
         train_create = _filter_wide(wide_create_df, train_ym) if wide_create_df is not None else None
         val_create = _filter_wide(wide_create_df, val_ym) if wide_create_df is not None else None
 
+        train_profit = _filter_wide(wide_profit_df, train_ym) if wide_profit_df is not None else None
+        val_profit = _filter_wide(wide_profit_df, val_ym) if wide_profit_df is not None else None
+
         # Обучаем скейлер только на train
-        train_ds = TabularDataset(train_wide, categories, wide_create_df=train_create, scaler=None, fit_on_init=True)
-        val_ds = TabularDataset(val_wide, categories, wide_create_df=val_create, scaler=train_ds.scaler, fit_on_init=False)
+        train_ds = TabularDataset(train_wide, categories, wide_create_df=train_create, wide_profit_df=train_profit, scaler=None, fit_on_init=True)
+        val_ds = TabularDataset(val_wide, categories, wide_create_df=val_create, wide_profit_df=val_profit, scaler=train_ds.scaler, fit_on_init=False)
 
         blind_ds = None
         if n_blind > 0:
             blind_wide = _filter_wide(wide_df, blind_ym)
             blind_create = _filter_wide(wide_create_df, blind_ym) if wide_create_df is not None else None
-            blind_ds = TabularDataset(blind_wide, categories, wide_create_df=blind_create, scaler=train_ds.scaler, fit_on_init=False)
+            blind_profit = _filter_wide(wide_profit_df, blind_ym) if wide_profit_df is not None else None
+            blind_ds = TabularDataset(blind_wide, categories, wide_create_df=blind_create, wide_profit_df=blind_profit, scaler=train_ds.scaler, fit_on_init=False)
 
         print(
             f"Dataset split: {len(train_ym)} train months ({len(train_ds)} samples), "
