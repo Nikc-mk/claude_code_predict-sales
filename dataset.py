@@ -98,44 +98,105 @@ class TabularDataset(Dataset):
             key=lambda x: (x[0], x[1]),
         )
 
+        # --- Предвычисляем rolling-окна один раз для всего DataFrame ---
+        # Вместо ~580 000 boolean-mask операций — 10 векторизованных вызовов
+        roll7_s  = self.wide_df.rolling(7,  min_periods=1).sum()
+        roll14_s = self.wide_df.rolling(14, min_periods=1).sum()
+        roll28_s = self.wide_df.rolling(28, min_periods=1).sum()
+        roll3_c  = self.wide_create_df.rolling(3,  min_periods=1).sum()
+        roll7_c  = self.wide_create_df.rolling(7,  min_periods=1).sum()
+        roll10_c = self.wide_create_df.rolling(10, min_periods=1).sum()
+        roll14_c = self.wide_create_df.rolling(14, min_periods=1).sum()
+        roll7_p  = self.wide_profit_df.rolling(7,  min_periods=1).sum()
+        roll14_p = self.wide_profit_df.rolling(14, min_periods=1).sum()
+        roll28_p = self.wide_profit_df.rolling(28, min_periods=1).sum()
+
         for year, month in ym_pairs:
             _, n_days = monthrange(year, month)
             cal = build_calendar_df(year, month)
+            month_idx = float(year * 12 + month)
+            month_sin = float(cal["month_sin"].iloc[0])
+            month_cos = float(cal["month_cos"].iloc[0])
 
             for cat in self.categories:
                 cat_idx = self.cat2idx[cat]
-                month_sales = get_month_sales(self.wide_df, year, month, cat)
-
+                month_sales  = get_month_sales(self.wide_df, year, month, cat)
                 month_profit = get_month_sales(self.wide_profit_df, year, month, cat)
+
+                # --- Константы для (year, month, cat) — не зависят от t ---
+                lastyear_sales_s     = get_month_sales(self.wide_df, year - 1, month, cat)
+                lastyear_month_total = float(lastyear_sales_s.sum())
+                prev_month_total     = get_previous_month_total(self.wide_df, year, month, cat)
+
+                lastyear_profit_s    = get_month_sales(self.wide_profit_df, year - 1, month, cat)
+                lastyear_profit_total = float(lastyear_profit_s.sum())
+                prev_profit_total    = get_previous_month_total(self.wide_profit_df, year, month, cat)
+
+                # --- Cumulative sum: O(1) lookup вместо O(t) pandas slice ---
+                sales_cs     = np.concatenate([[0.0], np.cumsum(month_sales.values)])
+                profit_cs    = np.concatenate([[0.0], np.cumsum(month_profit.values)])
+                ly_sales_cs  = np.concatenate([[0.0], np.cumsum(lastyear_sales_s.values)])
+                ly_profit_cs = np.concatenate([[0.0], np.cumsum(lastyear_profit_s.values)])
+                ly_s_len     = len(ly_sales_cs) - 1
+                ly_p_len     = len(ly_profit_cs) - 1
 
                 for t in range(1, n_days):  # t = 1..n_days-1 (последний день — только таргет)
                     day_date = pd.Timestamp(year=year, month=month, day=t)
-                    cal_row = cal.loc[day_date]
+                    cal_row  = cal.loc[day_date]
 
-                    # --- Таргет 0: сумма продаж с дня t+1 до конца месяца ---
-                    target = float(month_sales.iloc[t:].sum())
+                    # Таргеты через cumsum: O(1)
+                    target        = float(sales_cs[-1]  - sales_cs[t])
+                    target_profit = float(profit_cs[-1] - profit_cs[t])
 
-                    # --- Таргет 1: сумма прибыли с дня t+1 до конца месяца ---
-                    target_profit = float(month_profit.iloc[t:].sum())
+                    # Накопленные суммы текущего месяца: O(1)
+                    cumulative        = float(sales_cs[t])
+                    cumulative_profit = float(profit_cs[t])
 
-                    # --- Числовые признаки ---
-                    features = self._compute_features(
-                        year=year,
-                        month=month,
-                        cat=cat,
-                        t=t,
-                        day_date=day_date,
-                        cal_row=cal_row,
-                        month_sales=month_sales,
-                        month_profit=month_profit,
-                    )
+                    # Rolling-окна: O(1) lookup в предвычисленных DataFrame
+                    dd = day_date
+                    s7   = float(roll7_s.at[dd, cat])  if dd in roll7_s.index  else 0.0
+                    s14  = float(roll14_s.at[dd, cat]) if dd in roll14_s.index else 0.0
+                    s28  = float(roll28_s.at[dd, cat]) if dd in roll28_s.index else 0.0
+                    cs3  = float(roll3_c.at[dd, cat])  if dd in roll3_c.index  else 0.0
+                    cs7  = float(roll7_c.at[dd, cat])  if dd in roll7_c.index  else 0.0
+                    cs10 = float(roll10_c.at[dd, cat]) if dd in roll10_c.index else 0.0
+                    cs14 = float(roll14_c.at[dd, cat]) if dd in roll14_c.index else 0.0
+                    p7   = float(roll7_p.at[dd, cat])  if dd in roll7_p.index  else 0.0
+                    p14  = float(roll14_p.at[dd, cat]) if dd in roll14_p.index else 0.0
+                    p28  = float(roll28_p.at[dd, cat]) if dd in roll28_p.index else 0.0
+
+                    # Накопленные суммы прошлого года: O(1)
+                    lastyear_cumul        = float(ly_sales_cs[min(t, ly_s_len)])
+                    lastyear_profit_cumul = float(ly_profit_cs[min(t, ly_p_len)])
 
                     self._raw_samples.append(
                         {
-                            "features": features,           # list[float], len=NUM_NUMERICAL_FEATURES
-                            "category_id": cat_idx,         # int
-                            "target": target,               # float — оставшиеся продажи
-                            "target_profit": target_profit, # float — оставшаяся прибыль
+                            "features": [
+                                float(cal_row["days_left"]),
+                                float(cal_row["work_days_left"]),
+                                float(cal_row["days_passed"]),
+                                float(cal_row["work_days_passed"]),
+                                float(cal_row["is_weekend"]),
+                                cumulative,
+                                s7, s14, s28,
+                                cs3, cs7, cs10, cs14,
+                                lastyear_cumul,
+                                lastyear_month_total,
+                                prev_month_total,
+                                float(year),
+                                month_idx,
+                                float(day_date.toordinal()),
+                                month_sin,
+                                month_cos,
+                                cumulative_profit,
+                                p7, p14, p28,
+                                lastyear_profit_cumul,
+                                lastyear_profit_total,
+                                prev_profit_total,
+                            ],
+                            "category_id": cat_idx,
+                            "target": target,
+                            "target_profit": target_profit,
                         }
                     )
 
@@ -151,49 +212,27 @@ class TabularDataset(Dataset):
         month_profit: pd.Series,
     ) -> list[float]:
         """
-        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (28 штук):
-          days_left, work_days_left, days_passed, work_days_passed, is_weekend,
-          cumulative_sales, sales_last_7_days, sales_last_14_days, sales_last_28_days,
-          create_sales_last_3_days, create_sales_last_7_days,
-          create_sales_last_10_days, create_sales_last_14_days,
-          sales_lastyear_1_to_t, sales_lastyear_month_total,
-          sales_previous_month_total,
-          year, month_idx, time_idx, month_sin, month_cos,
-          cumulative_profit,
-          profit_last_7_days, profit_last_14_days, profit_last_28_days,
-          profit_lastyear_1_to_t, profit_lastyear_month_total,
-          profit_previous_month_total
+        Возвращает числовые признаки в порядке NUMERICAL_FEATURES (28 штук).
+        Используется только если вызывается напрямую (не из _build_samples).
         """
-        # Накопленная сумма с 1 по t (включительно)
         cumulative = float(month_sales.iloc[:t].sum())
-
-        # Скользящие окна (от day_date в сторону прошлого)
-        sales_7 = get_rolling_sum(self.wide_df, day_date, cat, 7)
+        sales_7  = get_rolling_sum(self.wide_df, day_date, cat, 7)
         sales_14 = get_rolling_sum(self.wide_df, day_date, cat, 14)
         sales_28 = get_rolling_sum(self.wide_df, day_date, cat, 28)
-
-        # Созданные заказы: скользящие окна
-        cs_3 = get_rolling_sum(self.wide_create_df, day_date, cat, 3)
-        cs_7 = get_rolling_sum(self.wide_create_df, day_date, cat, 7)
+        cs_3  = get_rolling_sum(self.wide_create_df, day_date, cat, 3)
+        cs_7  = get_rolling_sum(self.wide_create_df, day_date, cat, 7)
         cs_10 = get_rolling_sum(self.wide_create_df, day_date, cat, 10)
         cs_14 = get_rolling_sum(self.wide_create_df, day_date, cat, 14)
-
-        # Прошлый год: накопленная сумма за 1..t и итог всего месяца
-        lastyear_cumul = get_cumulative_to_day(self.wide_df, year - 1, month, cat, t)
+        lastyear_cumul       = get_cumulative_to_day(self.wide_df, year - 1, month, cat, t)
         lastyear_month_total = get_month_total(self.wide_df, year - 1, month, cat)
-
-        # Итог предыдущего месяца
-        prev_month_total = get_previous_month_total(self.wide_df, year, month, cat)
-
-        # --- Profit-признаки ---
-        cumulative_profit = float(month_profit.iloc[:t].sum())
+        prev_month_total     = get_previous_month_total(self.wide_df, year, month, cat)
+        cumulative_profit        = float(month_profit.iloc[:t].sum())
         profit_7  = get_rolling_sum(self.wide_profit_df, day_date, cat, 7)
         profit_14 = get_rolling_sum(self.wide_profit_df, day_date, cat, 14)
         profit_28 = get_rolling_sum(self.wide_profit_df, day_date, cat, 28)
         lastyear_profit_cumul       = get_cumulative_to_day(self.wide_profit_df, year - 1, month, cat, t)
         lastyear_profit_month_total = get_month_total(self.wide_profit_df, year - 1, month, cat)
         prev_profit_month_total     = get_previous_month_total(self.wide_profit_df, year, month, cat)
-
         return [
             float(cal_row["days_left"]),
             float(cal_row["work_days_left"]),
@@ -201,28 +240,14 @@ class TabularDataset(Dataset):
             float(cal_row["work_days_passed"]),
             float(cal_row["is_weekend"]),
             cumulative,
-            sales_7,
-            sales_14,
-            sales_28,
-            cs_3,
-            cs_7,
-            cs_10,
-            cs_14,
-            lastyear_cumul,
-            lastyear_month_total,
-            prev_month_total,
-            float(year),
-            float(year * 12 + month),
-            float(day_date.toordinal()),
-            float(cal_row["month_sin"]),
-            float(cal_row["month_cos"]),
+            sales_7, sales_14, sales_28,
+            cs_3, cs_7, cs_10, cs_14,
+            lastyear_cumul, lastyear_month_total, prev_month_total,
+            float(year), float(year * 12 + month), float(day_date.toordinal()),
+            float(cal_row["month_sin"]), float(cal_row["month_cos"]),
             cumulative_profit,
-            profit_7,
-            profit_14,
-            profit_28,
-            lastyear_profit_cumul,
-            lastyear_profit_month_total,
-            prev_profit_month_total,
+            profit_7, profit_14, profit_28,
+            lastyear_profit_cumul, lastyear_profit_month_total, prev_profit_month_total,
         ]
 
     # ------------------------------------------------------------------
